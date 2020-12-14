@@ -11,6 +11,8 @@ import (
 	"syscall"
 
 	"github.com/pkg/errors"
+
+	"fmt"
 )
 
 const tmUtilCmd = "tmutil"
@@ -29,13 +31,15 @@ type BorgBackup struct {
 	lockFile   string
 	borgArgs   []string
 	mountpoint string
+	source     string
 }
 
-func NewBackup(mountpoint string, lockfile string, borgArgs []string) BorgBackup {
+func NewBackup(mountpoint string, lockfile string, source string, borgArgs []string) BorgBackup {
 	return BorgBackup{
 		lockFile:   lockfile,
 		borgArgs:   borgArgs,
 		mountpoint: mountpoint,
+		source: source,
 	}
 }
 
@@ -78,7 +82,7 @@ func (b BorgBackup) Run(ctx context.Context) error {
 		}
 	}()
 	parts := strings.Split(snapshot, ".")
-	if len(parts) != 4 {
+	if len(parts) != 5 {
 		return errors.WithStack(unrecognizedSnapshotName)
 	}
 	hostName, err := os.Hostname()
@@ -94,14 +98,15 @@ func (b BorgBackup) Run(ctx context.Context) error {
 }
 
 func (b BorgBackup) createSnapshot() error {
-	cmd := exec.Command(tmUtilCmd, "localsnapshot")
+	//cmd := exec.Command(tmUtilCmd, "localsnapshot")
+	cmd := exec.Command(tmUtilCmd, "snapshot", b.source)
 	cmd.Env = safeEnvs()
 	err := errors.Wrap(cmd.Run(), "error while creating snapshot")
 	return err
 }
 
 func (b BorgBackup) getLatestSnapshot() (string, error) {
-	cmd := exec.Command(tmUtilCmd, "listlocalsnapshots", "/")
+	cmd := exec.Command(tmUtilCmd, "listlocalsnapshots", b.source)
 	buf := new(bytes.Buffer)
 	cmd.Stdout = buf
 	cmd.Env = safeEnvs()
@@ -126,7 +131,10 @@ func (b BorgBackup) getLatestSnapshot() (string, error) {
 func (b BorgBackup) mountSnapshot(snapshot string) error {
 	// there'is no unix.Mount for Darwin, so we have to
 	// use exec to invoke mount.
-	cmd := exec.Command("mount", "-t", "apfs", "-r", "-o", "-s="+snapshot, "/", b.mountpoint)
+	//cmd := exec.Command("mount", "-t", "apfs", "-r", "-o", "-s="+snapshot, b.source, b.mountpoint)
+	args := []string{"mount_apfs", "-o", "rdonly", "-s", snapshot, b.source, b.mountpoint}
+	fmt.Print(strings.Join(args, `', '`), '\n')
+	cmd := exec.Command("mount_apfs", "-o", "rdonly,nobrowse", "-s", snapshot, b.source, b.mountpoint)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = safeEnvs()
@@ -135,7 +143,7 @@ func (b BorgBackup) mountSnapshot(snapshot string) error {
 
 func removeSnapshot(name string) error {
 	parts := strings.Split(name, ".")
-	if len(parts) != 4 {
+	if len(parts) != 5 {
 		return errors.WithStack(unrecognizedSnapshotName)
 	}
 	cmd := exec.Command(tmUtilCmd, "deletelocalsnapshots", parts[3])

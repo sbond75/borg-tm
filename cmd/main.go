@@ -15,11 +15,12 @@ import (
 )
 
 func main() {
-	var borgArgs, mountpoint, lockFile string
+	var borgArgs, mountpoint, lockFile, source string
 	flag.StringVar(&borgArgs, "borg-args", "", "argument passed to `borg create`")
 	flag.StringVar(&mountpoint, "mountpoint", "/tmp/snapshot",
 		"mountpoint for snapshot, should be kept the same across backups")
 	flag.StringVar(&lockFile, "lock-file", "/var/run/borg.lock", "lock file for borg-tm")
+	flag.StringVar(&source, "source", "/", "source to back up")
 	var printVersion bool
 	flag.BoolVar(&printVersion, "V", false, "print version")
 	flag.Usage = func() {
@@ -68,7 +69,7 @@ Arguments:
 	if os.Getuid() != 0 {
 		log.Fatalln("requires root privileges.")
 	}
-	backup := internal.NewBackup(mountpoint, lockFile, args)
+	backup := internal.NewBackup(mountpoint, lockFile, source, args)
 	err := backup.Run(ctx)
 	if err != nil {
 		log.Fatalf("error while backup: %+v\n", err)
