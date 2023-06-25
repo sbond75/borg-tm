@@ -20,22 +20,25 @@ type arrayFlags []string
 func (i *arrayFlags) String() string {
 	return "my string representation"
 }
+
 func (i *arrayFlags) Set(value string) error {
 	*i = append(*i, value)
 	return nil
 }
 
 func main() {
-	var borgArgs, lockFile string
-	var mountpoints, sources arrayFlags
+	var borgArgs, lockFile, backupName string
+	var mountpoints, sources, snapshotsToUse arrayFlags
 	var useExistingSnapshots, dryRun bool
 	flag.StringVar(&borgArgs, "borg-args", "", "argument passed to `borg create`")
 	// flag.StringVar(&mountpoint, "mountpoint", "/tmp/snapshot",
 	// 	"mountpoint for snapshot, should be kept the same across backups")
 	flag.Var(&mountpoints, "mountpoint", "mountpoint(s) for snapshot(s), should be kept the same across backups")
 	flag.StringVar(&lockFile, "lock-file", "/var/run/borg.lock", "lock file for borg-tm")
-	//flag.StringVar(&source, "source", "/", "source to back up")
-	flag.Var(&sources, "source", "source(s) to back up")
+	// flag.StringVar(&source, "source", "/", "source to back up")
+	flag.Var(&sources, "source", "source(s) to back up. if any of these are the same as the mountpoint parameter corresponding to them, they will not be mounted, but the folder will be used as if it were already mounted.")
+	flag.Var(&snapshotsToUse, "snapshotToUse", "(optional) snapshot(s) to force as the source for the back up instead of creating snapshots or using the latest snapshot. Leave arguments empty strings to use the latest snapshot for a corresponding source and mountpoint. Provide `--use-existing-snapshots` when using this, or it is an error.")
+	flag.StringVar(&backupName, "backup-name", "", "use a specific backup name instead of an auto-generated one.")
 	flag.BoolVar(&useExistingSnapshots, "use-existing-snapshots", false, "use the latest existing snapshot on the source(s) to back up from. If not provided, will create a snapshot.")
 	flag.BoolVar(&dryRun, "dry-run", false, "create and remove snapshots, but don't run borg, only print the borg command that would have been executed.")
 	var printVersion bool
@@ -53,12 +56,12 @@ Arguments:
 `, os.Args[0])
 
 		flag.PrintDefaults()
-		//fmt.Fprintf(os.Stderr, "...And then put sources in a list which will be backed up. For example: `/ /System/Volumes/Data`")
-		
-		fmt.Fprintf(os.Stderr, "\nNote: %s\n", "`-mountpoint` and `-source` can be used multiple times to set more mountpoints and sources (respective of the order provided for each). For example, use `-source / -source /System/Volumes/Data -mountpoint /tmp/snapshot -mountpoint /tm/snapshot-data` to set two sources each with their corresponding mountpoint.")
+		// fmt.Fprintf(os.Stderr, "...And then put sources in a list which will be backed up. For example: `/ /System/Volumes/Data`")
+
+		fmt.Fprintf(os.Stderr, "\nNote: %s\n", "`-mountpoint` and `-source` can be used multiple times to set more mountpoints and sources (respective of the order provided for each). For example, use `-source / -source /System/Volumes/Data -mountpoint /tmp/snapshot -mountpoint /tmp/snapshot-data` to set two sources each with their corresponding mountpoint.")
 	}
 	flag.Parse()
-	//sources = flag.Args() // https://stackoverflow.com/questions/28322997/how-to-get-a-list-of-values-into-a-flag-in-golang
+	// sources = flag.Args() // https://stackoverflow.com/questions/28322997/how-to-get-a-list-of-values-into-a-flag-in-golang
 	if printVersion {
 		consts.PrintVersion()
 		os.Exit(0)
@@ -73,6 +76,14 @@ Arguments:
 	}
 	if len(mountpoints) != len(sources) {
 		log.Fatalln("The number of mountpoints provided (%d) is not the same as the number of sources provided (%d)", len(mountpoints), len(sources))
+		os.Exit(1)
+	}
+	if !useExistingSnapshots && len(snapshotsToUse) > 0 {
+		log.Fatalln("Need --use-existing-snapshots when providing at least one --snapshotToUse")
+		os.Exit(1)
+	}
+	if len(snapshotsToUse) > 0 && len(sources) != len(snapshotsToUse) {
+		log.Fatalln("The number of sources and mountpoints provided (%d) is not the same as the number of snapshots to use (`--snapshotToUse`) provided (%d)", len(sources), len(snapshotsToUse))
 		os.Exit(1)
 	}
 
@@ -102,7 +113,7 @@ Arguments:
 	if os.Getuid() != 0 {
 		log.Fatalln("requires root privileges.")
 	}
-	backup := internal.NewBackup(mountpoints, lockFile, useExistingSnapshots, sources, args, dryRun)
+	backup := internal.NewBackup(mountpoints, lockFile, useExistingSnapshots, sources, snapshotsToUse, backupName, args, dryRun)
 	err := backup.Run(ctx)
 	if err != nil {
 		log.Fatalf("error while backup: %+v\n", err)

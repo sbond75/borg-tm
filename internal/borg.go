@@ -4,18 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
-
-	"github.com/pkg/errors"
-
-	"fmt"
 	"time"
 
-	"sync"
+	"github.com/pkg/errors"
 )
 
 const tmUtilCmd = "tmutil"
@@ -36,16 +34,20 @@ type BorgBackup struct {
 	mountpoints          []string
 	useExistingSnapshots bool
 	sources              []string
+	snapshotsToUse       []string
+	backupName           string
 	dryRun               bool
 }
 
-func NewBackup(mountpoints []string, lockfile string, useExistingSnapshots bool, sources []string, borgArgs []string, dryRun bool) BorgBackup {
+func NewBackup(mountpoints []string, lockfile string, useExistingSnapshots bool, sources []string, snapshotsToUse []string, backupName string, borgArgs []string, dryRun bool) BorgBackup {
 	return BorgBackup{
 		lockFile:             lockfile,
 		borgArgs:             borgArgs,
 		mountpoints:          mountpoints,
 		useExistingSnapshots: useExistingSnapshots,
 		sources:              sources,
+		snapshotsToUse:       snapshotsToUse,
+		backupName:           backupName,
 		dryRun:               dryRun,
 	}
 }
@@ -82,13 +84,13 @@ func (b BorgBackup) Run(ctx context.Context) (finalErr error) {
 			for i := 0; i < len(b.sources); i++ {
 				source := b.sources[i]
 
-				go func(source string) {				
+				go func(source string) {
 					fmt.Printf("Creating snapshot for source %s\n", source)
 					err = b.createSnapshot(source)
 					if err != nil {
 						err = errors.Wrapf(err, "error while creating snapshot for source %s", source)
-						
-						//return err
+
+						// return err
 						fatalErrorChannel <- err
 					} else {
 						fmt.Printf("Created snapshot for source %s\n", source)
@@ -116,29 +118,50 @@ func (b BorgBackup) Run(ctx context.Context) (finalErr error) {
 			source := b.sources[i]
 			mountpoint := b.mountpoints[i]
 
-			snapshot, err := b.getLatestSnapshot(source)
+			fmt.Printf("source: %s\n", source)
+			fmt.Printf("mountpoint: %s\n", mountpoint)
+			shouldMount := source != mountpoint
+			var snapshot string = ""
+			var err error = nil
+			if shouldMount && (len(b.snapshotsToUse) == 0 || b.snapshotsToUse[i] == "") {
+				snapshot, err = b.getLatestSnapshot(source)
+			} else if len(b.snapshotsToUse) > 0 {
+				snapshot = b.snapshotsToUse[i]
+			}
 			if err != nil {
 				return err
 			}
-			err = b.mountSnapshot(snapshot, source, mountpoint)
+			if shouldMount {
+				err = b.mountSnapshot(snapshot, source, mountpoint)
+			}
 			if err != nil {
 				return err
 			}
 			defer func() { // "defer will move the execution of the statement to the very end" [of] "a function." ( https://www.educative.io/answers/what-is-the-defer-keyword-in-golang#:~:text=In%20Golang%2C%20the%20defer%20keyword,very%20end%20inside%20a%20function. )
-				fmt.Printf("Unmounting %s\n", mountpoint)
-				err := unmount(mountpoint)
-				if err != nil {
-					log.Fatalf("unmount %s failed, need manual cleanup.\n", mountpoint)
-				} else {
-					fmt.Printf("Unmounted %s\n", mountpoint)
+				if shouldMount {
+					fmt.Printf("Unmounting %s\n", mountpoint)
+					err := unmount(mountpoint)
+					if err != nil {
+						log.Fatalf("unmount %s failed, need manual cleanup.\n", mountpoint)
+					} else {
+						fmt.Printf("Unmounted %s\n", mountpoint)
+					}
 				}
 			}()
 			snapshots = append(snapshots, snapshot)
 		}
 		partsArray := [][]string{}
+		var now string = time.Now().Format("2006-01-02 15:04:05")
 		for i := 0; i < len(snapshots); i++ {
 			snapshot := snapshots[i]
-
+			if snapshot == "" {
+				snapshot = now // just using `snapshot` variable as a backup display name at this point, since the snapshot is already mounted
+				parts := []string{"", "", "", snapshot, ""}
+				fmt.Printf("Parts for %s: %s\n", snapshot, strings.Join(parts, `', '`))
+				partsArray = append(partsArray, parts)
+				continue
+			}
+			
 			// parts := strings.Split(snapshot, ".")
 			// if len(parts) != 5 {
 			// 	return errors.WithStack(unrecognizedSnapshotName)
@@ -156,7 +179,11 @@ func (b BorgBackup) Run(ctx context.Context) (finalErr error) {
 			return errors.Wrap(err, "error while getting hostname")
 		}
 
-		err = b.invokeBorg(ctx, partsArray[0][3]+"@"+hostName)
+		var backupName string = b.backupName
+		if backupName == "" {
+			backupName = partsArray[0][3]+"@"+hostName
+		}
+		err = b.invokeBorg(ctx, backupName)
 		// if err != nil {
 		// 	err2 := removeSnapshots()
 		// 	return errors.Errorf("Failed to invoke Borg and also to delete snapshots: %w ; %w", err, err2)
@@ -198,8 +225,8 @@ func (b BorgBackup) Run(ctx context.Context) (finalErr error) {
 }
 
 func (b BorgBackup) createSnapshot(source string) error {
-	//cmd := exec.Command(tmUtilCmd, "localsnapshot")
-	//cmd := exec.Command(tmUtilCmd, "snapshot", source)
+	// cmd := exec.Command(tmUtilCmd, "localsnapshot")
+	// cmd := exec.Command(tmUtilCmd, "snapshot", source)
 	cmd := exec.Command("./apfs/snapUtil", "-c", time.Now().Format("2006-01-02 15:04:05"), source) // Need "com.apple.developer.vfs.snapshot" entitlement
 	cmd.Env = safeEnvs()
 	err := errors.Wrap(cmd.Run(), "error while creating snapshot")
@@ -232,7 +259,7 @@ func (b BorgBackup) getLatestSnapshot(source string) (string, error) {
 func (b BorgBackup) mountSnapshot(snapshot string, source string, mountpoint string) error {
 	// there'is no unix.Mount for Darwin, so we have to
 	// use exec to invoke mount.
-	//cmd := exec.Command("mount", "-t", "apfs", "-r", "-o", "-s="+snapshot, b.source, mountpoint)
+	// cmd := exec.Command("mount", "-t", "apfs", "-r", "-o", "-s="+snapshot, b.source, mountpoint)
 	args := []string{"mount_apfs", "-o", "ro,nobrowse", "-s", snapshot, source, mountpoint}
 	fmt.Println(strings.Join(args, `', '`))
 	cmd := exec.Command(args[0], args[1:]...)
@@ -248,7 +275,7 @@ func (b BorgBackup) removeSnapshot(name string, source string) error {
 	// 	//parts = []string{"", "", "", parts[0], ""}
 	// 	return errors.WithStack(unrecognizedSnapshotName)
 	// }
-	//cmd := exec.Command(tmUtilCmd, "deletelocalsnapshots", parts[3])
+	// cmd := exec.Command(tmUtilCmd, "deletelocalsnapshots", parts[3])
 	cmd := exec.Command("./apfs/snapUtil", "-d" /*parts[3]*/, name, source)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -264,7 +291,7 @@ func unmount(mountpoint string) error {
 func (b BorgBackup) invokeBorg(ctx context.Context, archiveName string) error {
 	args := []string{"create"}
 	args = append(args, b.borgArgs...)
-	args = append(args, "::" + archiveName)
+	args = append(args, "::"+archiveName)
 	args = append(args, b.mountpoints...)
 	fmt.Println("borg", args)
 	if b.dryRun {

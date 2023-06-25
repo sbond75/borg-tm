@@ -5,8 +5,10 @@ import (
 	"os"
 )
 
-var commitID string
-var version string
+var (
+	commitID string
+	version  string
+)
 
 func CommitID() string {
 	return commitID
